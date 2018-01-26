@@ -1,0 +1,97 @@
+#!/bin/bash
+
+# This is a script to automatically synchronize a local project folder to a
+# remote server
+# It watches the local folder for changes and recreates the local state on the
+# target machine as soon as a change is detected.
+
+################################################################################
+
+PROJECT="watch-and-sync"
+VERSION="0.0.1"
+
+# Set up your path to fswatch here if you don't want to / can't add it
+# globally to your PATH variable (default is "fswatch" when specified in PATH).
+# e.g. FSWATCH_PATH="/Users/you/builds/fswatch/fswatch"
+FSWATCH_PATH="fswatch"
+
+hash $FSWATCH_PATH 2>/dev/null || { echo >&2 "I require fswatch but it's not installed.  Aborting."; exit 1; }
+
+# Sync latency / speed in seconds
+LATENCY="1"
+
+# check color support
+colors=$(tput colors)
+if (($colors >= 8)); then
+    red='\033[0;31m'
+    green='\033[0;32m'
+    nocolor='\033[00m'
+else
+  red=
+  green=
+  nocolor=
+fi
+
+# Check compulsory arguments
+if [[ "$1" = "" || "$2" = "" || "$3" = "" ]]; then
+  echo -e "${red}Error: $PROJECT takes 3 compulsory arguments.${nocolor}"
+  echo "Usage: $PROJECT /local/path remote_server /remote_server/path "
+  exit
+else
+  LOCAL_PATH="$1"
+  REMOTE="$2"
+  REMOTE_PATH="$3"
+fi
+if [[ $REMOTE_PATH = "." ]]; then
+  echo -e "${red} You probably don't what . as remote path.${nocolor}"
+  echo ""
+  exit
+fi
+if [[ $REMOTE_PATH = "/" ]]; then
+  echo -e "${red}Error: You probably don't what / as remote path.${nocolor}"
+  echo ""
+  exit
+fi
+
+# Welcome
+echo    ""
+echo -e "${green}Hello! This is $PROJECT v$VERSION.${nocolor}"
+echo    "Local source path:  \"$LOCAL_PATH\""
+echo    "To remote server:   \"$REMOTE:$REMOTE_PATH\" "
+echo    ""
+echo    "Warning: Remote path will be overwritten with local version if differences occur!!!"
+
+set -e
+set -u
+#set -x
+echo -n   "Dry run... "
+
+rsync --dry-run -avzr --delete --force --exclude=".gitignore" --exclude=".git" --filter=':- .gitignore'  -e "ssh"  $LOCAL_PATH $REMOTE:$REMOTE_PATH
+echo      " done."
+
+
+read -n1 -r -p "Press any key to continue (or abort with Ctrl-C)... " key
+
+echo -n   "Synchronizing ... "
+rsync -azr --delete --force --exclude=".gitignore" --exclude=".git" --filter=':- .gitignore' -e "ssh"  $LOCAL_PATH $REMOTE:$REMOTE_PATH
+echo      " done."
+
+# Watch for changes and sync (exclude hidden files)
+echo  "Watching for changes. Quit anytime with Ctrl-C."
+
+${FSWATCH_PATH} -0 -r -l $LATENCY $LOCAL_PATH \
+    --exclude="/\.*/$" --exclude="/\.[^/]*$" \
+    --exclude=".*___jb_tmp___$" --exclude=".*___jb_bak___$" --exclude=".*___jb_old___$" \
+    --exclude=".*\.lock$" \
+| while read -d "" event
+  do
+    git check-ignore -q $event || {
+        echo $event > .tmp_files
+        echo -en "${green}" `date` "${nocolor}\"$event\" changed. Synchronizing... "
+        rsync -avzr -q --delete --force --filter=':- .gitignore' \
+            --include-from=.tmp_files \
+            -e "ssh" $LOCAL_PATH $REMOTE:$REMOTE_PATH
+        echo "done."
+        rm -rf .tmp_files
+    }
+  done
